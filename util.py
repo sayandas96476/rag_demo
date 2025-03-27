@@ -1,153 +1,106 @@
-#import chromadb
 import requests
 from bs4 import BeautifulSoup
-
-
-from langchain_community.embeddings.sentence_transformer import (
-    SentenceTransformerEmbeddings,
-)
-from langchain_community.vectorstores import Chroma
-import os
-from langchain_community.vectorstores import Chroma
-
-from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import TextLoader
-
-from langchain.text_splitter import CharacterTextSplitter
-
 import re
-
-
-
-
 import cohere
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings import CohereEmbeddings
-from langchain.vectorstores import Chroma
-api_key = 'WbTLzQDGKfv3rtYzptfh9XR4mpQrTjTsewkputI8'
-
-
-
-
-
-
-#obtained data using wikipedia api
-#prsed using beautiful soup
-
-def get_full_wikipedia_content(url):
-
-    try:
-        # Make the request
-        response = requests.get(url)
-        response.raise_for_status()
-        #return response.text
-
-        # Parse the HTML content
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Find the main content div
-        content_div = soup.find(id="mw-content-text")
-
-        # Extract all paragraphs
-        paragraphs = content_div.find_all('p')
-
-        # Combine all paragraph texts
-        full_text = '\n\n'.join([para.get_text() for para in paragraphs])
-
-        # Remove citations [1], [2], etc.
-        import re
-        full_text = re.sub(r'\[\d+\]', '', full_text)
-
-        return full_text.strip()
-
-    except requests.RequestException as e:
-        return f"Error fetching page: {str(e)}"
-
-
-#preprocessing
-def combine_strings(original_list, chunk_size=3):
-    return [''.join(original_list[i:i + chunk_size])
-            for i in range(0, len(original_list), chunk_size)]
-
-
-def preprocess(text):
-    text = text.replace('\n', '')
-
-    lis = text.split(".")
-
-    combined = combine_strings(lis)
-    text = """ """
-    for i in combined:
-        text += i+"\n\n\n"
-    return text
-
-#chunking
+import configparser
 from langchain.text_splitter import CharacterTextSplitter
 
-def create_chunks(text):
-    text_splitter = CharacterTextSplitter(
-        separator = '\n\n\n',
-        chunk_size = 200,
-    )
+class WikipediaContentFetcher:
+    def __init__(self, url):
+        self.url = url
 
-   
-    documents = text_splitter.create_documents([text])
-    
-    return documents
+    def get_full_wikipedia_content(self):
+        try:
+            response = requests.get(self.url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            content_div = soup.find(id="mw-content-text")
+            paragraphs = content_div.find_all('p')
+            full_text = '\n\n'.join([para.get_text() for para in paragraphs])
+            full_text = re.sub(r'\[\d+\]', '', full_text)
+            return full_text.strip()
+        except requests.RequestException as e:
+            return f"Error fetching page: {str(e)}"
 
-def documented(documents):
-    document_texts = [doc.page_content for doc in documents]
-    return document_texts
+class TextPreprocessor:
+    @staticmethod
+    def combine_strings(original_list, chunk_size=3):
+        return [''.join(original_list[i:i + chunk_size]) for i in range(0, len(original_list), chunk_size)]
 
-def retriever(documents,document_texts,query):
-    co = cohere.Client(api_key)
-    model="rerank-english-v2.0"
-    rerank_results = co.rerank(model=model, query=query, documents=document_texts, top_n=2)
-    CONTEXT = """"""
-    for result in rerank_results.results:
-        CONTEXT +=document_texts[result.index]+"\n=======================\n"
-        #print(f"Relevance Score: {result.relevance_score:.2f}, Text: {document_texts[result.index]}")
-    return CONTEXT
+    @staticmethod
+    def preprocess(text):
+        text = text.replace('\n', '')
+        lis = text.split(".")
+        combined = TextPreprocessor.combine_strings(lis)
+        text = "".join([i + "\n\n\n" for i in combined])
+        return text
 
+class DocumentSplitter:
+    def __init__(self, chunk_size=200):
+        self.chunk_size = chunk_size
+        self.text_splitter = CharacterTextSplitter(separator='\n\n\n', chunk_size=self.chunk_size)
 
-import requests
+    def create_chunks(self, text):
+        return self.text_splitter.create_documents([text])
 
-def generator(CONTEXT,query):
-    API_KEY = "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"
-    URL = "https://api.groq.com/openai/v1/chat/completions"
+class CohereReranker:
+    def __init__(self, api_key, model):
+        self.co = cohere.Client(api_key)
+        self.model = model
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
+    def rerank_documents(self, query, document_texts):
+        rerank_results = self.co.rerank(model=self.model, query=query, documents=document_texts, top_n=2)
+        context = "".join([document_texts[result.index] + "\n=======================\n" for result in rerank_results.results])
+        return context
 
-    template= f"""
-        Use the following CONTEXT to answer the QUESTION at the end.
-        If you don't know the answer, just say that "I DONT KNOW", don't try to make up an answer.
-        Also remember don't use any external knowledge and only refer to this CONTEXT to answer question.
-        Consider this CONTEXT as the ultimate truth.
+class GroqGenerator:
+    def __init__(self, api_key, model):
+        self.api_key = api_key
+        self.model = model
 
+    def generate_answer(self, context, query):
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        template = f"""
+            Use the following CONTEXT to answer the QUESTION at the end.
+            If you don't know the answer, just say that "I DONT KNOW", don't try to make up an answer.
+            Also remember don't use any external knowledge and only refer to this CONTEXT to answer question.
+            Consider this CONTEXT as the ultimate truth.
 
-    CONTEXT: {CONTEXT}
-    QUESTION: {query}
+            CONTEXT: {context}
+            QUESTION: {query}
+        """
+        data = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": "You are a helpful assistant."},
+                         {"role": "user", "content": template}]
+        }
+        response = requests.post(url, headers=headers, json=data)
 
-    """
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        else:
+            return "Server error"
 
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": template}
-        ]
-    }
+class KnowledgeBase:
+    def __init__(self, config, url=None):
+        self.config = config
+        # If no URL is passed, it will fall back to config (which is from UI now)
+        self.fetcher = WikipediaContentFetcher(url)
+        self.preprocessor = TextPreprocessor()
+        self.splitter = DocumentSplitter()
+        self.reranker = CohereReranker(self.config.get('API', 'cohere_api_key'), self.config.get('Models', 'cohere_model'))
+        self.generator = GroqGenerator(self.config.get('API', 'groq_api_key'), self.config.get('Models', 'groq_model'))
 
-    response = requests.post(URL, headers=headers, json=data)
+    def fetch_and_process(self):
+        raw_content = self.fetcher.get_full_wikipedia_content()
+        processed_text = self.preprocessor.preprocess(raw_content)
+        documents = self.splitter.create_chunks(processed_text)
+        document_texts = [doc.page_content for doc in documents]
+        return document_texts
 
-    if response.status_code == 200:
-        ans = response.json()["choices"][0]["message"]["content"]
-        #print(response.json()["choices"][0]["message"]["content"])
-    else:
-        #print(f"Error: {response.status_code}, {response.text}")
-        ans = "Server error"
-    return ans
-
+    def answer_query(self, query):
+        document_texts = self.fetch_and_process()
+        context = self.reranker.rerank_documents(query, document_texts)
+        answer = self.generator.generate_answer(context, query)
+        return answer
